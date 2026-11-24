@@ -78,19 +78,19 @@ async function loadMembersAndTasks() {
   ]);
 
   const members: Member[] = membersRes.rows.map((r) => ({
-    id: String(r[0]) as MemberId,
-    name: String(r[1]),
-    role: String(r[2]),
-    title: String(r[3]),
-    github_username: String(r[4] || ""),
-    avatar_color: String(r[5]),
+    id: String(r.id) as MemberId,
+    name: String(r.name),
+    role: String(r.role),
+    title: String(r.title),
+    github_username: String(r.github_username || ""),
+    avatar_color: String(r.avatar_color),
   }));
 
   const tasks = tasksRes.rows.map((r) => ({
-    id: Number(r[0]),
-    code: String(r[1]),
-    status: String(r[2]),
-    title: String(r[3]),
+    id: Number(r.id),
+    code: String(r.code),
+    status: String(r.status),
+    title: String(r.title),
   }));
 
   const validCodes = new Set(tasks.map((t) => t.code.toUpperCase()));
@@ -215,7 +215,7 @@ export async function syncGitHubRepository(): Promise<SyncResult> {
     const runsData = runsRes.ok ? ((await runsRes.json()) as GitHubWorkflowResponse) : {};
 
     const existingRes = await query("SELECT id FROM github_events");
-    const existingIds = new Set(existingRes.rows.map((r) => String(r[0])));
+    const existingIds = new Set(existingRes.rows.map((r) => String(r.id)));
 
     let newCommits = 0;
     let newPrs = 0;

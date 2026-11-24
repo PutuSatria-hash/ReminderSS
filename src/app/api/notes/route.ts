@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     const now = nowIso();
     const res = await query(
       `INSERT INTO notes (title, content, category, author_id, assignee_id, is_pinned, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
       [
         title,
         (body.content || "").trim(),

@@ -120,7 +120,7 @@ export interface ProjectSettings {
   github_branch: string;
   has_github_token: boolean;
   has_webhook_secret: boolean;
-  storage_mode: "turso" | "local";
+  storage_mode: "neon" | "turso" | "local";
   auto_sync_seconds: number;
   discord_webhook: string;
   last_sync_at: string;

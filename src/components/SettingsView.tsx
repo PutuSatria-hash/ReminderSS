@@ -108,7 +108,13 @@ export default function SettingsView({
     onToast("Backup JSON berhasil diunduh.");
   }
 
-  const isTurso = data.settings.storage_mode === "turso";
+  const isCloud = data.settings.storage_mode === "neon" || data.settings.storage_mode === "turso";
+  const storageTitle =
+    data.settings.storage_mode === "neon"
+      ? "Mode Penyimpanan: Neon Postgres Cloud (Aktif & Permanen)"
+      : data.settings.storage_mode === "turso"
+        ? "Mode Penyimpanan: Turso Cloud SQLite (Aktif & Permanen)"
+        : "Mode Penyimpanan: SQLite Lokal (pm-dashboard/data/monitor.db)";
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -118,25 +124,21 @@ export default function SettingsView({
         </p>
         <h1 className="mt-1 text-2xl font-semibold tracking-tight">Pengaturan Proyek & GitHub</h1>
         <p className="mt-1 text-sm text-[var(--text-secondary)]">
-          Mendukung mode hybrid: otomatis memakai <strong className="text-[var(--text-primary)]">Turso Cloud SQLite</strong> saat hosting di Vercel (anti auto-pause) dan <span className="font-mono-code text-xs">data/monitor.db</span> saat dijalankan lokal.
+          Mendukung mode hybrid: otomatis memakai <strong className="text-[var(--text-primary)]">Neon Postgres</strong> (1-klik dari Vercel Storage, auto-wake tanpa pause manual) saat di Vercel dan <span className="font-mono-code text-xs">data/monitor.db</span> saat lokal.
         </p>
       </div>
 
       {/* Storage Status Banner */}
       <div className="surface-card flex items-start gap-3 rounded-xl p-4 text-xs text-[var(--text-secondary)]">
         <Database
-          className={`mt-0.5 h-4 w-4 shrink-0 ${isTurso ? "text-emerald-400" : "text-sky-400"}`}
+          className={`mt-0.5 h-4 w-4 shrink-0 ${isCloud ? "text-emerald-400" : "text-sky-400"}`}
         />
         <div>
-          <p className="font-medium text-[var(--text-primary)]">
-            {isTurso
-              ? "Mode Penyimpanan: Turso Cloud SQLite (Aktif & Permanen)"
-              : "Mode Penyimpanan: SQLite Lokal (pm-dashboard/data/monitor.db)"}
-          </p>
+          <p className="font-medium text-[var(--text-primary)]">{storageTitle}</p>
           <p className="mt-0.5 leading-relaxed">
-            {isTurso
-              ? "Database terhubung ke Turso via libSQL. Tidak pernah mati otomatis tiap 7 hari dan siap diakses bersama oleh Boss, Yoga, dan Juli di Vercel."
-              : "Saat ini berjalan lokal di laptop. Untuk hosting Vercel, tambahkan TURSO_DATABASE_URL dan TURSO_AUTH_TOKEN di Environment Variables Vercel."}
+            {isCloud
+              ? "Database cloud aktif dan permanen. Data tugas, checklist, dan komentar aman diakses bersama oleh Boss, Yoga, dan Juli di Vercel."
+              : "Saat ini berjalan lokal di laptop. Untuk hosting Vercel, buka tab Storage di dashboard Vercel lalu tambahkan Neon Postgres (DATABASE_URL otomatis terpasang)."}
           </p>
         </div>
       </div>

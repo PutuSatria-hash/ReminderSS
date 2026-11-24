@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createClient, type Client, type InArgs, type ResultSet } from "@libsql/client";
+import { createClient, type Client, type InValue } from "@libsql/client";
+import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 import type {
   CommentItem,
   DashboardBootstrap,
@@ -16,7 +17,14 @@ import type {
   TaskItem,
 } from "./types";
 
+export interface QueryResult {
+  rows: Record<string, unknown>[];
+  lastInsertRowid: number | null;
+}
+
 declare global {
+  // eslint-disable-next-line no-var
+  var __cadenceNeon: NeonQueryFunction<false, false> | undefined;
   // eslint-disable-next-line no-var
   var __cadenceLibsql: Client | undefined;
   // eslint-disable-next-line no-var
@@ -33,11 +41,34 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
-export function getStorageMode(): "turso" | "local" {
-  return process.env.TURSO_DATABASE_URL?.trim() ? "turso" : "local";
+function getNeonUrl(): string {
+  return (
+    process.env.DATABASE_URL?.trim() ||
+    process.env.POSTGRES_URL?.trim() ||
+    process.env.POSTGRES_PRISMA_URL?.trim() ||
+    ""
+  );
 }
 
-function getRawClient(): Client {
+export function getStorageMode(): "neon" | "turso" | "local" {
+  if (getNeonUrl()) return "neon";
+  if (process.env.TURSO_DATABASE_URL?.trim()) return "turso";
+  return "local";
+}
+
+function convertPlaceholdersToPg(sql: string): string {
+  let index = 0;
+  return sql.replace(/\?/g, () => `$${++index}`);
+}
+
+function getNeonClient(): NeonQueryFunction<false, false> {
+  if (!globalThis.__cadenceNeon) {
+    globalThis.__cadenceNeon = neon(getNeonUrl());
+  }
+  return globalThis.__cadenceNeon;
+}
+
+function getLibsqlClient(): Client {
   if (globalThis.__cadenceLibsql) {
     return globalThis.__cadenceLibsql;
   }
@@ -51,7 +82,6 @@ function getRawClient(): Client {
     return globalThis.__cadenceLibsql;
   }
 
-  // Local SQLite fallback (or ephemeral /tmp on Vercel if Turso env not configured yet)
   const dataDir = process.env.VERCEL ? "/tmp" : path.join(process.cwd(), "data");
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -63,51 +93,78 @@ function getRawClient(): Client {
   return globalThis.__cadenceLibsql;
 }
 
-export async function getDb(): Promise<Client> {
-  const client = getRawClient();
+async function rawExecute(sql: string, args: Array<string | number | null> = []): Promise<QueryResult> {
+  const mode = getStorageMode();
+  if (mode === "neon") {
+    const client = getNeonClient();
+    const pgSql = convertPlaceholdersToPg(sql);
+    const rows = (await client.query(pgSql, args)) as Record<string, unknown>[];
+    const plainRows = rows.map((r) => ({ ...r }));
+    const firstId = plainRows[0]?.id !== undefined ? Number(plainRows[0].id) : null;
+    return {
+      rows: plainRows,
+      lastInsertRowid: Number.isFinite(firstId) ? firstId : null,
+    };
+  }
+
+  const client = getLibsqlClient();
+  const res = await client.execute({ sql, args: args as InValue[] });
+  const plainRows = res.rows.map((row) => {
+    const obj: Record<string, unknown> = {};
+    for (let i = 0; i < res.columns.length; i++) {
+      obj[res.columns[i]] = row[i];
+    }
+    return obj;
+  });
+  const firstId =
+    plainRows[0]?.id !== undefined
+      ? Number(plainRows[0].id)
+      : res.lastInsertRowid !== undefined
+        ? Number(res.lastInsertRowid)
+        : null;
+  return {
+    rows: plainRows,
+    lastInsertRowid: firstId !== null && Number.isFinite(firstId) ? firstId : null,
+  };
+}
+
+async function ensureInitialized(): Promise<void> {
   if (!globalThis.__cadenceInitPromise) {
-    globalThis.__cadenceInitPromise = initAndSeed(client).catch((err) => {
+    globalThis.__cadenceInitPromise = initAndSeed().catch((err) => {
       globalThis.__cadenceInitPromise = undefined;
       throw err;
     });
   }
   await globalThis.__cadenceInitPromise;
-  return client;
 }
 
-export async function query(sql: string, args: InArgs = []): Promise<ResultSet> {
-  const db = await getDb();
-  return db.execute({ sql, args });
+export async function query(
+  sql: string,
+  args: Array<string | number | null> = []
+): Promise<QueryResult> {
+  await ensureInitialized();
+  return rawExecute(sql, args);
 }
 
-function toPlainRows<T>(res: ResultSet): T[] {
-  return res.rows.map((row) => {
-    const obj: Record<string, unknown> = {};
-    for (let i = 0; i < res.columns.length; i++) {
-      obj[res.columns[i]] = row[i];
-    }
-    return obj as T;
-  });
-}
+async function initAndSeed(): Promise<void> {
+  const isPg = getStorageMode() === "neon";
+  const pk = isPg ? "SERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT";
 
-async function initAndSeed(db: Client): Promise<void> {
-  await db.executeMultiple(`
-    CREATE TABLE IF NOT EXISTS settings (
+  const schemaStatements = [
+    `CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS members (
+    )`,
+    `CREATE TABLE IF NOT EXISTS members (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       role TEXT NOT NULL,
       title TEXT NOT NULL,
       github_username TEXT NOT NULL DEFAULT '',
       avatar_color TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS tasks (
+      id ${pk},
       code TEXT UNIQUE NOT NULL,
       title TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
@@ -118,18 +175,16 @@ async function initAndSeed(db: Client): Promise<void> {
       due_date TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS task_checklists (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS task_checklists (
+      id ${pk},
       task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
       label TEXT NOT NULL,
       is_done INTEGER NOT NULL DEFAULT 0,
       sort_order INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS notes (
+      id ${pk},
       title TEXT NOT NULL,
       content TEXT NOT NULL DEFAULT '',
       category TEXT NOT NULL DEFAULT 'checklist',
@@ -138,10 +193,9 @@ async function initAndSeed(db: Client): Promise<void> {
       is_pinned INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS note_checklists (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS note_checklists (
+      id ${pk},
       note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
       label TEXT NOT NULL,
       assignee_id TEXT,
@@ -149,10 +203,9 @@ async function initAndSeed(db: Client): Promise<void> {
       checked_by TEXT,
       checked_at TEXT,
       sort_order INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS comments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS comments (
+      id ${pk},
       target_type TEXT NOT NULL,
       target_id INTEGER NOT NULL,
       author_id TEXT NOT NULL REFERENCES members(id),
@@ -160,19 +213,17 @@ async function initAndSeed(db: Client): Promise<void> {
       kind TEXT NOT NULL DEFAULT 'comment',
       is_resolved INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS rubric_items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS rubric_items (
+      id ${pk},
       section TEXT NOT NULL,
       title TEXT NOT NULL,
       owner_id TEXT NOT NULL REFERENCES members(id),
       is_done INTEGER NOT NULL DEFAULT 0,
       notes TEXT NOT NULL DEFAULT '',
       sort_order INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS github_events (
+    )`,
+    `CREATE TABLE IF NOT EXISTS github_events (
       id TEXT PRIMARY KEY,
       event_type TEXT NOT NULL,
       sha_or_number TEXT NOT NULL,
@@ -185,10 +236,9 @@ async function initAndSeed(db: Client): Promise<void> {
       branch TEXT NOT NULL DEFAULT '',
       occurred_at TEXT NOT NULL,
       synced_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS notifications (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS notifications (
+      id ${pk},
       kind TEXT NOT NULL,
       title TEXT NOT NULL,
       message TEXT NOT NULL,
@@ -196,11 +246,15 @@ async function initAndSeed(db: Client): Promise<void> {
       ref_id TEXT,
       is_read INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
-    );
-  `);
+    )`,
+  ];
 
-  const countRes = await db.execute("SELECT COUNT(*) as c FROM members");
-  const count = Number(countRes.rows[0]?.[0] ?? 0);
+  for (const stmt of schemaStatements) {
+    await rawExecute(stmt);
+  }
+
+  const countRes = await rawExecute("SELECT COUNT(*) as c FROM members");
+  const count = Number(countRes.rows[0]?.c ?? 0);
   if (count > 0) return;
 
   const now = nowIso();
@@ -224,10 +278,10 @@ async function initAndSeed(db: Client): Promise<void> {
   };
 
   for (const [k, v] of Object.entries(defaultSettings)) {
-    await db.execute({
-      sql: "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-      args: [k, v],
-    });
+    await rawExecute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING", [
+      k,
+      v,
+    ]);
   }
 
   const membersSeed: Array<[string, string, string, string, string, string]> = [
@@ -236,10 +290,10 @@ async function initAndSeed(db: Client): Promise<void> {
     ["juli", "Juli", "Frontend", "UI/UX & Flutter Pages", "", "#10B981"],
   ];
   for (const m of membersSeed) {
-    await db.execute({
-      sql: "INSERT OR IGNORE INTO members (id, name, role, title, github_username, avatar_color) VALUES (?, ?, ?, ?, ?, ?)",
-      args: m,
-    });
+    await rawExecute(
+      "INSERT INTO members (id, name, role, title, github_username, avatar_color) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+      m
+    );
   }
 
   const seedTasks: Array<{
@@ -454,10 +508,10 @@ async function initAndSeed(db: Client): Promise<void> {
 
   const taskIdsByCode: Record<string, number> = {};
   for (const t of seedTasks) {
-    const res = await db.execute({
-      sql: `INSERT INTO tasks (code, title, description, assignee_id, status, priority, category, due_date, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [
+    const res = await rawExecute(
+      `INSERT INTO tasks (code, title, description, assignee_id, status, priority, category, due_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+      [
         t.code,
         t.title,
         t.description,
@@ -468,23 +522,22 @@ async function initAndSeed(db: Client): Promise<void> {
         t.due_date,
         now,
         now,
-      ],
-    });
+      ]
+    );
     const taskId = Number(res.lastInsertRowid);
     taskIdsByCode[t.code] = taskId;
     for (let idx = 0; idx < t.checklists.length; idx++) {
-      await db.execute({
-        sql: "INSERT INTO task_checklists (task_id, label, is_done, sort_order) VALUES (?, ?, 0, ?)",
-        args: [taskId, t.checklists[idx], idx],
-      });
+      await rawExecute(
+        "INSERT INTO task_checklists (task_id, label, is_done, sort_order) VALUES (?, ?, 0, ?)",
+        [taskId, t.checklists[idx], idx]
+      );
     }
   }
 
-  // Seed Notes
-  const note1Res = await db.execute({
-    sql: `INSERT INTO notes (title, content, category, author_id, assignee_id, is_pinned, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [
+  const note1Res = await rawExecute(
+    `INSERT INTO notes (title, content, category, author_id, assignee_id, is_pinned, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    [
       "Checklist Kickoff & Aturan Kerja Tim",
       "Aturan main agar monitoring GitHub berjalan otomatis: setiap kali push kode ke GitHub, sertakan kode tugas di pesan commit (contoh: feat: buat tabel mata_kuliah [BE-01]). Kalau ada bagian yang membingungkan, langsung tulis di kolom komentar di bawah ini atau di detail tugas terkait.",
       "checklist",
@@ -493,8 +546,8 @@ async function initAndSeed(db: Client): Promise<void> {
       1,
       now,
       now,
-    ],
-  });
+    ]
+  );
   const note1 = Number(note1Res.lastInsertRowid);
 
   const note1Items: Array<[string, MemberId | null]> = [
@@ -505,17 +558,17 @@ async function initAndSeed(db: Client): Promise<void> {
     ["Sepakati kontrak model Dart sebelum mulai coding paralel", "boss"],
   ];
   for (let idx = 0; idx < note1Items.length; idx++) {
-    await db.execute({
-      sql: `INSERT INTO note_checklists (note_id, label, assignee_id, is_done, checked_by, checked_at, sort_order)
-            VALUES (?, ?, ?, 0, NULL, NULL, ?)`,
-      args: [note1, note1Items[idx][0], note1Items[idx][1], idx],
-    });
+    await rawExecute(
+      `INSERT INTO note_checklists (note_id, label, assignee_id, is_done, checked_by, checked_at, sort_order)
+       VALUES (?, ?, ?, 0, NULL, NULL, ?)`,
+      [note1, note1Items[idx][0], note1Items[idx][1], idx]
+    );
   }
 
-  const note2Res = await db.execute({
-    sql: `INSERT INTO notes (title, content, category, author_id, assignee_id, is_pinned, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [
+  const note2Res = await rawExecute(
+    `INSERT INTO notes (title, content, category, author_id, assignee_id, is_pinned, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    [
       "Catatan Teknis: Relasi Foreign Key & Validasi Hapus",
       "Pastikan di sqflite onConfigure menjalankan PRAGMA foreign_keys = ON. Untuk aturan hapus mata kuliah, lakukan query COUNT(*) pada tabel tugas terlebih dahulu sebelum menghapus agar UI bisa menampilkan pesan alasan yang ramah mahasiswa.",
       "review",
@@ -524,8 +577,8 @@ async function initAndSeed(db: Client): Promise<void> {
       0,
       now,
       now,
-    ],
-  });
+    ]
+  );
   const note2 = Number(note2Res.lastInsertRowid);
   const note2Items: Array<[string, MemberId]> = [
     ["Aktifkan PRAGMA foreign_keys = ON di onConfigure", "yoga"],
@@ -533,39 +586,39 @@ async function initAndSeed(db: Client): Promise<void> {
     ["Tampilkan AlertDialog alasan gagal hapus di UI", "juli"],
   ];
   for (let idx = 0; idx < note2Items.length; idx++) {
-    await db.execute({
-      sql: `INSERT INTO note_checklists (note_id, label, assignee_id, is_done, checked_by, checked_at, sort_order)
-            VALUES (?, ?, ?, 0, NULL, NULL, ?)`,
-      args: [note2, note2Items[idx][0], note2Items[idx][1], idx],
-    });
+    await rawExecute(
+      `INSERT INTO note_checklists (note_id, label, assignee_id, is_done, checked_by, checked_at, sort_order)
+       VALUES (?, ?, ?, 0, NULL, NULL, ?)`,
+      [note2, note2Items[idx][0], note2Items[idx][1], idx]
+    );
   }
 
-  await db.execute({
-    sql: `INSERT INTO comments (target_type, target_id, author_id, body, kind, is_resolved, created_at)
-          VALUES (?, ?, ?, ?, ?, 0, ?)`,
-    args: [
+  await rawExecute(
+    `INSERT INTO comments (target_type, target_id, author_id, body, kind, is_resolved, created_at)
+     VALUES (?, ?, ?, ?, ?, 0, ?)`,
+    [
       "note",
       note1,
       "boss",
       "Silakan Yoga dan Juli tinggalkan komentar di sini atau di masing-masing kartu task jika ada requirement yang masih bingung.",
       "comment",
       now,
-    ],
-  });
+    ]
+  );
 
   if (taskIdsByCode["FE-04"]) {
-    await db.execute({
-      sql: `INSERT INTO comments (target_type, target_id, author_id, body, kind, is_resolved, created_at)
-            VALUES (?, ?, ?, ?, ?, 0, ?)`,
-      args: [
+    await rawExecute(
+      `INSERT INTO comments (target_type, target_id, author_id, body, kind, is_resolved, created_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?)`,
+      [
         "task",
         taskIdsByCode["FE-04"],
         "juli",
         "Contoh pertanyaan: untuk format tanggal batas waktu di database apakah disimpan sebagai ISO string YYYY-MM-DD atau epoch milliseconds agar cocok dengan showDatePicker?",
         "question",
         now,
-      ],
-    });
+      ]
+    );
   }
 
   const rubricSeed: Array<[string, string, MemberId]> = [
@@ -589,32 +642,39 @@ async function initAndSeed(db: Client): Promise<void> {
   ];
 
   for (let idx = 0; idx < rubricSeed.length; idx++) {
-    await db.execute({
-      sql: "INSERT INTO rubric_items (section, title, owner_id, is_done, notes, sort_order) VALUES (?, ?, ?, 0, '', ?)",
-      args: [rubricSeed[idx][0], rubricSeed[idx][1], rubricSeed[idx][2], idx],
-    });
+    await rawExecute(
+      "INSERT INTO rubric_items (section, title, owner_id, is_done, notes, sort_order) VALUES (?, ?, ?, 0, '', ?)",
+      [rubricSeed[idx][0], rubricSeed[idx][1], rubricSeed[idx][2], idx]
+    );
   }
 
-  const storageLabel = getStorageMode() === "turso" ? "Turso Cloud SQLite" : "SQLite Lokal";
-  await db.execute({
-    sql: `INSERT INTO notifications (kind, title, message, link_tab, ref_id, is_read, created_at)
-          VALUES (?, ?, ?, ?, ?, 0, ?)`,
-    args: [
+  const mode = getStorageMode();
+  const storageLabel =
+    mode === "neon"
+      ? "Neon Postgres Cloud"
+      : mode === "turso"
+        ? "Turso Cloud SQLite"
+        : "SQLite Lokal";
+
+  await rawExecute(
+    `INSERT INTO notifications (kind, title, message, link_tab, ref_id, is_read, created_at)
+     VALUES (?, ?, ?, ?, ?, 0, ?)`,
+    [
       "system",
       `Workspace monitoring siap (${storageLabel})`,
       "Masukkan link repository GitHub di Pengaturan untuk mengaktifkan auto-sync dan GitHub Webhook real-time.",
       "settings",
       null,
       now,
-    ],
-  });
+    ]
+  );
 }
 
 export async function getSettingsMap(): Promise<Record<string, string>> {
   const res = await query("SELECT key, value FROM settings");
   const map: Record<string, string> = {};
-  for (const r of toPlainRows<{ key: string; value: string }>(res)) {
-    map[r.key] = r.value;
+  for (const r of res.rows) {
+    map[String(r.key)] = String(r.value ?? "");
   }
   return map;
 }
@@ -731,31 +791,42 @@ export async function getDashboardBootstrap(): Promise<DashboardBootstrap> {
     query("SELECT * FROM notifications ORDER BY id DESC LIMIT 40"),
   ]);
 
-  const members = toPlainRows<Member>(membersRes);
-  const rawTasks = toPlainRows<Omit<TaskItem, "checklists" | "comments" | "linked_events">>(tasksRes);
-  const rawTaskChecks = toPlainRows<Omit<TaskChecklistItem, "is_done"> & { is_done: number }>(
-    taskChecksRes
-  );
-  const rawComments = toPlainRows<Omit<CommentItem, "is_resolved"> & { is_resolved: number }>(
-    commentsRes
-  );
-  const rawEvents = toPlainRows<GitHubEventItem>(eventsRes);
-  const rawNotes = toPlainRows<
+  const members = membersRes.rows as unknown as Member[];
+  const rawTasks = tasksRes.rows as unknown as Array<
+    Omit<TaskItem, "checklists" | "comments" | "linked_events">
+  >;
+  const rawTaskChecks = taskChecksRes.rows as unknown as Array<
+    Omit<TaskChecklistItem, "is_done"> & { is_done: number }
+  >;
+  const rawComments = commentsRes.rows as unknown as Array<
+    Omit<CommentItem, "is_resolved"> & { is_resolved: number }
+  >;
+  const rawEvents = eventsRes.rows as unknown as GitHubEventItem[];
+  const rawNotes = notesRes.rows as unknown as Array<
     Omit<NoteItem, "is_pinned" | "checklists" | "comments"> & { is_pinned: number }
-  >(notesRes);
-  const rawNoteChecks = toPlainRows<Omit<NoteChecklistItem, "is_done"> & { is_done: number }>(
-    noteChecksRes
-  );
-  const rawRubric = toPlainRows<Omit<RubricItem, "is_done"> & { is_done: number }>(rubricRes);
-  const rawNotifications = toPlainRows<Omit<NotificationItem, "is_read"> & { is_read: number }>(
-    notifsRes
-  );
+  >;
+  const rawNoteChecks = noteChecksRes.rows as unknown as Array<
+    Omit<NoteChecklistItem, "is_done"> & { is_done: number }
+  >;
+  const rawRubric = rubricRes.rows as unknown as Array<
+    Omit<RubricItem, "is_done"> & { is_done: number }
+  >;
+  const rawNotifications = notifsRes.rows as unknown as Array<
+    Omit<NotificationItem, "is_read"> & { is_read: number }
+  >;
 
   const taskCheckMap = new Map<number, TaskChecklistItem[]>();
   for (const c of rawTaskChecks) {
-    const arr = taskCheckMap.get(Number(c.task_id)) || [];
-    arr.push({ ...c, id: Number(c.id), task_id: Number(c.task_id), is_done: Boolean(c.is_done) });
-    taskCheckMap.set(Number(c.task_id), arr);
+    const taskId = Number(c.task_id);
+    const arr = taskCheckMap.get(taskId) || [];
+    arr.push({
+      ...c,
+      id: Number(c.id),
+      task_id: taskId,
+      sort_order: Number(c.sort_order),
+      is_done: Boolean(Number(c.is_done)),
+    });
+    taskCheckMap.set(taskId, arr);
   }
 
   const taskCommentMap = new Map<number, CommentItem[]>();
@@ -765,7 +836,7 @@ export async function getDashboardBootstrap(): Promise<DashboardBootstrap> {
       ...cm,
       id: Number(cm.id),
       target_id: Number(cm.target_id),
-      is_resolved: Boolean(cm.is_resolved),
+      is_resolved: Boolean(Number(cm.is_resolved)),
     };
     if (cm.target_type === "task") {
       const arr = taskCommentMap.get(parsed.target_id) || [];
@@ -807,7 +878,8 @@ export async function getDashboardBootstrap(): Promise<DashboardBootstrap> {
       ...nc,
       id: Number(nc.id),
       note_id: noteId,
-      is_done: Boolean(nc.is_done),
+      sort_order: Number(nc.sort_order),
+      is_done: Boolean(Number(nc.is_done)),
     });
     noteCheckMap.set(noteId, arr);
   }
@@ -817,7 +889,7 @@ export async function getDashboardBootstrap(): Promise<DashboardBootstrap> {
     return {
       ...n,
       id,
-      is_pinned: Boolean(n.is_pinned),
+      is_pinned: Boolean(Number(n.is_pinned)),
       checklists: noteCheckMap.get(id) || [],
       comments: noteCommentMap.get(id) || [],
     };
@@ -826,13 +898,14 @@ export async function getDashboardBootstrap(): Promise<DashboardBootstrap> {
   const rubric: RubricItem[] = rawRubric.map((r) => ({
     ...r,
     id: Number(r.id),
-    is_done: Boolean(r.is_done),
+    sort_order: Number(r.sort_order),
+    is_done: Boolean(Number(r.is_done)),
   }));
 
   const notifications: NotificationItem[] = rawNotifications.map((n) => ({
     ...n,
     id: Number(n.id),
-    is_read: Boolean(n.is_read),
+    is_read: Boolean(Number(n.is_read)),
   }));
 
   return {

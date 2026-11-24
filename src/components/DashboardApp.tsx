@@ -223,7 +223,11 @@ export default function DashboardApp({ initialData }: DashboardAppProps) {
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold tracking-tight">Cadence PM</p>
             <p className="truncate text-[10px] text-[var(--text-muted)]">
-              {data.settings.storage_mode === "turso" ? "Turso Cloud SQLite" : "Local SQLite"}
+              {data.settings.storage_mode === "neon"
+                ? "Neon Postgres Cloud"
+                : data.settings.storage_mode === "turso"
+                  ? "Turso Cloud SQLite"
+                  : "Local SQLite"}
             </p>
           </div>
         </div>
@@ -374,7 +378,11 @@ export default function DashboardApp({ initialData }: DashboardAppProps) {
             <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
               <span className="hidden sm:inline">
-                {data.settings.storage_mode === "turso" ? "Turso Cloud Aktif" : "SQLite Lokal Aktif"}
+                {data.settings.storage_mode === "neon"
+                  ? "Neon Postgres Aktif"
+                  : data.settings.storage_mode === "turso"
+                    ? "Turso Cloud Aktif"
+                    : "SQLite Lokal Aktif"}
               </span>
               {data.settings.github_repo && (
                 <>

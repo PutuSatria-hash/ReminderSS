@@ -17,7 +17,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       "SELECT COALESCE(MAX(sort_order), -1) as m FROM note_checklists WHERE note_id = ?",
       [noteId]
     );
-    const nextOrder = Number(maxRes.rows[0]?.[0] ?? -1) + 1;
+    const nextOrder = Number(maxRes.rows[0]?.m ?? -1) + 1;
 
     await query(
       `INSERT INTO note_checklists (note_id, label, assignee_id, is_done, checked_by, checked_at, sort_order)

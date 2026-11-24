@@ -36,17 +36,17 @@ export async function POST(req: Request) {
 
     if (kind === "question" || kind === "blocker") {
       const mRes = await query("SELECT name FROM members WHERE id = ?", [authorId]);
-      const authorName = mRes.rows[0]?.[0] ? String(mRes.rows[0][0]) : authorId;
+      const authorName = mRes.rows[0]?.name ? String(mRes.rows[0].name) : authorId;
 
       let refLabel = "";
       if (body.target_type === "task") {
         const tRes = await query("SELECT code, title FROM tasks WHERE id = ?", [body.target_id]);
         refLabel = tRes.rows[0]
-          ? `[${String(tRes.rows[0][0])}] ${String(tRes.rows[0][1])}`
+          ? `[${String(tRes.rows[0].code)}] ${String(tRes.rows[0].title)}`
           : `Task #${body.target_id}`;
       } else {
         const nRes = await query("SELECT title FROM notes WHERE id = ?", [body.target_id]);
-        refLabel = nRes.rows[0] ? String(nRes.rows[0][0]) : `Catatan #${body.target_id}`;
+        refLabel = nRes.rows[0] ? String(nRes.rows[0].title) : `Catatan #${body.target_id}`;
       }
 
       const notifTitle =

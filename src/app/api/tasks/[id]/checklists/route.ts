@@ -17,7 +17,7 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
       "SELECT COALESCE(MAX(sort_order), -1) as m FROM task_checklists WHERE task_id = ?",
       [taskId]
     );
-    const nextOrder = Number(maxRes.rows[0]?.[0] ?? -1) + 1;
+    const nextOrder = Number(maxRes.rows[0]?.m ?? -1) + 1;
 
     await query(
       "INSERT INTO task_checklists (task_id, label, is_done, sort_order) VALUES (?, ?, 0, ?)",

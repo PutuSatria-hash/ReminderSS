@@ -7,7 +7,7 @@ async function generateNextCode(prefix: string): Promise<string> {
   const res = await query("SELECT code FROM tasks WHERE code LIKE ?", [`${prefix}-%`]);
   let maxNum = 0;
   for (const r of res.rows) {
-    const num = Number(String(r[0]).split("-")[1]);
+    const num = Number(String(r.code).split("-")[1]);
     if (!Number.isNaN(num) && num > maxNum) maxNum = num;
   }
   return `${prefix}-${String(maxNum + 1).padStart(2, "0")}`;
@@ -42,7 +42,7 @@ export async function POST(req: Request) {
     const now = nowIso();
     const res = await query(
       `INSERT INTO tasks (code, title, description, assignee_id, status, priority, category, due_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
       [
         code,
         title,

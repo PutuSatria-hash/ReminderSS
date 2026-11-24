@@ -32,7 +32,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Item rubrik wajib diisi." }, { status: 400 });
     }
     const maxRes = await query("SELECT COALESCE(MAX(sort_order), -1) as m FROM rubric_items");
-    const nextOrder = Number(maxRes.rows[0]?.[0] ?? -1) + 1;
+    const nextOrder = Number(maxRes.rows[0]?.m ?? -1) + 1;
     await query(
       "INSERT INTO rubric_items (section, title, owner_id, is_done, notes, sort_order) VALUES (?, ?, ?, 0, '', ?)",
       [body.section || "Fitur Tambahan", title, body.owner_id || "boss", nextOrder]
