@@ -1,0 +1,16 @@
+# dependencies
+node_modules/
+.next/
+out/
+
+# local database (keep personal data & tokens out of git)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# env & logs
+.env
+.env*.local
+*.tsbuildinfo
+npm-debug.log*
+.DS_Store
